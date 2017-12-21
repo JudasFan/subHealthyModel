@@ -6,19 +6,15 @@
 # @File    : GenPower.py
 # @Software: PyCharm
 
-import multiprocessing
-from multiprocessing import Pool
+from getDatasFromGolden import get
 import pandas as pd
-from datetime import *
-import datetime
+from datetime import datetime,timedelta
 import pymysql
-import matplotlib.pyplot as plt
 import sqlite3
 
 MODEL_NAME = '机组发电功率异常'
 ANALYSOR='刘利军'
 EVA_METHOD = ['箱形图', '均值']
-MINUTES = 1
 QUARTILE = 3.0
 MEAN = 10
 REMOTE_DB = {'user':'llj','passwd':'llj@2016'}
@@ -95,14 +91,14 @@ class generate:
         self.end_time=end_time
         self.author=author
         self.cal_farm=farm_path()
-        self.run()
+        self.loop()
 
-    def run(self):
+    def loop(self):
         for farm in self.cal_farm.farm_name:
             print(farm, 'begin...')
-            self.warning(self.cal_farm.wtgs_path[farm], self.start_time, self.end_time, self.author)
+            self.algorithm(self.cal_farm.wtgs_path[farm], self.start_time, self.end_time, self.author)
 
-    class warning:
+    class algorithm:
         # return the warning record of a wtgs based run data of a period
         def __init__(self, wtgs_path, start_time, end_time, author):
             self.abnormal_records = []
@@ -118,224 +114,78 @@ class generate:
                     self.run_condition_tag = self.tag_set[key]
                 if key=='风速' or key=='风速实时值':
                     self.windspeed_tag = self.tag_set[key]
-            print(self.windspeed_tag)
-            self.run()  # run the algorithm and get the warnning info
+            self.mainstep()  # run the algorithm and get the warnning info
             self.export()  # export warning info to .DB (local or remote)
 
-        def run(self):
+        def mainstep(self):
             # step1:query real data
-            manager = multiprocessing.Manager()
-            q1 = manager.Queue()  # hold the value of temperature
-            q2 = manager.Queue()  # hold the value of power
-            p = Pool(processes=2)  # process pool
-            # multiprocess: query temperature value based on avg(mins)
+            wtgs_list = []
             for index, row in self.wtgs_path.iterrows():
-                wtgs = self.wtgs_path.ix[index, :]
-                result = p.apply_async(self.query_temp_mins_value, args=(wtgs, q1, q2))
-            p.close()
-            p.join()
-            if not result.successful():
-                print("unfortunately, failed to add process to pool...")
-            # merge
-            self.wtgsPowerValue = pd.DataFrame()
-            self.wtgsSpeedValue = pd.DataFrame()
-            while not q1.empty():
-                if self.wtgsPowerValue.empty:
-                    self.wtgsPowerValue = q1.get()
-                else:
-                    self.wtgsPowerValue = self.wtgsPowerValue.join(q1.get())
-            while not q2.empty():
-                if self.wtgsSpeedValue.empty:
-                    self.wtgsSpeedValue = q2.get()
-                else:
-                    self.wtgsSpeedValue = self.wtgsSpeedValue.join(q2.get())
-            print(self.wtgs_path['FARM_NAME'].iloc[0],'query finished')
+                wtgs_list.append(str(self.wtgs_path.ix[index, :]['WTGS_ID']))
+            wtgsWindSpeedValue = get.MultiWtgsWithOneTag(wtgs_list, self.windspeed_tag, self.start_time, self.end_time)
+            wtgsPowerValue = get.MultiWtgsWithOneTag(wtgs_list, self.power_tag, self.start_time, self.end_time)
+            print(self.wtgs_path['FARM_NAME'].iloc[0], 'query finished')
             # generate the abnormal record using boxplot or mean method
             AbnormalRecord = []
-            wtgslist = list(self.wtgsSpeedValue.columns)
-            for time, row in self.wtgsSpeedValue.iterrows():
+            if int(wtgs_list[0])//10000==1:
+                WIND_SPLITER = SPPED_SPLITER_15MW
+            else:
+                WIND_SPLITER = SPPED_SPLITER_20MW
+            for time, row in wtgsWindSpeedValue.iterrows():
                 # part1: divide the wtgs into different group based on its power
-                if int(self.wtgs_path['FARM_CODE'].iloc[0]/10000)==1:
-                    wtgs_as_speed = {str(i): [] for i in range(len(SPPED_SPLITER_15MW) + 1)}
-                    windspeed_data = self.wtgsSpeedValue.ix[time]
-                    power_data = self.wtgsPowerValue.ix[time]
-                    for wtgs in wtgslist:
-                        value = windspeed_data[wtgs]
-                        if value < SPPED_SPLITER_15MW[0]:
-                            wtgs_as_speed['0'].append(wtgs)
-                        elif value >= SPPED_SPLITER_15MW[0] and value <= SPPED_SPLITER_15MW[1]:
-                            wtgs_as_speed['1'].append(wtgs)
-                        elif value > SPPED_SPLITER_15MW[1] and value <= SPPED_SPLITER_15MW[2]:
-                            wtgs_as_speed['2'].append(wtgs)
-                        elif value > SPPED_SPLITER_15MW[2] and value <= SPPED_SPLITER_15MW[3]:
-                            wtgs_as_speed['3'].append(wtgs)
-                        elif value > SPPED_SPLITER_15MW[3] and value <= SPPED_SPLITER_15MW[4]:
-                            wtgs_as_speed['4'].append(wtgs)
-                        elif value > SPPED_SPLITER_15MW[4] and value <= SPPED_SPLITER_15MW[5]:
-                            wtgs_as_speed['5'].append(wtgs)
-                        elif value > SPPED_SPLITER_15MW[5] and value <= SPPED_SPLITER_15MW[6]:
-                            wtgs_as_speed['6'].append(wtgs)
-                        elif value > SPPED_SPLITER_15MW[6] and value <= SPPED_SPLITER_15MW[7]:
-                            wtgs_as_speed['7'].append(wtgs)
-                        else:
-                            pass
-                else:
-                    wtgs_as_speed = {str(i): [] for i in range(len(SPPED_SPLITER_20MW) + 1)}
-                    windspeed_data = self.wtgsSpeedValue.ix[time]
-                    power_data = self.wtgsPowerValue.ix[time]
-                    for wtgs in wtgslist:
-                        value = windspeed_data[wtgs].iloc(0)
-                        if value < SPPED_SPLITER_20MW[0]:
-                            wtgs_as_speed['0'].append(wtgs)
-                        elif value >= SPPED_SPLITER_20MW[0] and value <= SPPED_SPLITER_20MW[1]:
-                            wtgs_as_speed['1'].append(wtgs)
-                        elif value > SPPED_SPLITER_20MW[1] and value <= SPPED_SPLITER_20MW[2]:
-                            wtgs_as_speed['2'].append(wtgs)
-                        elif value > SPPED_SPLITER_20MW[2] and value <= SPPED_SPLITER_20MW[3]:
-                            wtgs_as_speed['3'].append(wtgs)
-                        elif value > SPPED_SPLITER_20MW[3] and value <= SPPED_SPLITER_20MW[4]:
-                            wtgs_as_speed['4'].append(wtgs)
-                        elif value > SPPED_SPLITER_20MW[4] and value <= SPPED_SPLITER_20MW[5]:
-                            wtgs_as_speed['5'].append(wtgs)
-                        elif value > SPPED_SPLITER_20MW[5] and value <= SPPED_SPLITER_20MW[6]:
-                            wtgs_as_speed['6'].append(wtgs)
-                        elif value > SPPED_SPLITER_20MW[6] and value <= SPPED_SPLITER_20MW[7]:
-                            wtgs_as_speed['7'].append(wtgs)
-                        else:
-                            pass
-                # part2: analyze the power of wtgs and to find abnormal wtgs in the same group
-                for key, wtgsgroup in wtgs_as_speed.items():
+                wtgs_as_windspeed = {str(i): [] for i in range(len(WIND_SPLITER) + 1)}
+                wspeed_data = wtgsWindSpeedValue.ix[time]
+                power_data = wtgsPowerValue.ix[time]
+                for wtgs in wtgs_list:
+                    value = wspeed_data[wtgs]
+                    if value < WIND_SPLITER[0]:
+                        wtgs_as_windspeed['0'].append(wtgs)
+                    elif value >= WIND_SPLITER[0] and value <= WIND_SPLITER[1]:
+                        wtgs_as_windspeed['1'].append(wtgs)
+                    elif value > WIND_SPLITER[1] and value <= WIND_SPLITER[2]:
+                        wtgs_as_windspeed['2'].append(wtgs)
+                    elif value > WIND_SPLITER[2] and value <= WIND_SPLITER[3]:
+                        wtgs_as_windspeed['3'].append(wtgs)
+                    elif value > WIND_SPLITER[3] and value <= WIND_SPLITER[4]:
+                        wtgs_as_windspeed['4'].append(wtgs)
+                    elif value > WIND_SPLITER[4] and value <= WIND_SPLITER[5]:
+                        wtgs_as_windspeed['5'].append(wtgs)
+                    elif value > WIND_SPLITER[5] and value <= WIND_SPLITER[6]:
+                        wtgs_as_windspeed['6'].append(wtgs)
+                    else:
+                        pass
+                # part2: analyze the temp of wtgs and to find abnormal wtgs in the same group
+                for key, wtgsgroup in wtgs_as_windspeed.items():
                     if len(wtgsgroup) >= 4:
-                        power_value_group = power_data.ix[[int(wtgs) for wtgs in wtgsgroup]]
-                        avg_windspeed = windspeed_data.ix[[int(wtgs) for wtgs in wtgsgroup]]
-                        avg_windspeed = sum(avg_windspeed) / len(avg_windspeed)
-                        [max_value, avg_speed] = quartile(power_value_group.tolist()) #四分位方法
-                        for abwtgs in power_value_group.index:
-                            if power_value_group.ix[abwtgs] >= max_value and max_value != 0:
-                                AbnormalRecord.append([self.wtgs_path['FARM_CODE'].iloc[0], self.wtgs_path['FARM_NAME'].iloc[0], abwtgs, MODEL_NAME, time, power_value_group.ix[abwtgs], avg_speed, avg_windspeed])
+                        temp_value_group = power_data.ix[[str(wtgs) for wtgs in wtgsgroup]]
+                        avg_power = wspeed_data.ix[[str(wtgs) for wtgs in wtgsgroup]]
+                        avg_power = sum(avg_power) / len(avg_power)
+                        [max_value, avg_temp] = quartile(temp_value_group.tolist())  # 四分位方法
+                        for abwtgs in temp_value_group.index:
+                            if temp_value_group.ix[abwtgs] >= max_value and max_value != 0:
+                                AbnormalRecord.append(
+                                    [self.wtgs_path['FARM_CODE'].iloc[0], self.wtgs_path['FARM_NAME'].iloc[0],
+                                     abwtgs, MODEL_NAME, time, temp_value_group.ix[abwtgs], avg_temp, avg_power])
                             else:
                                 continue
-            # part3:filter the orignal abnormal record with 60 mins, if a wtgs is under abnormal status more than 10 mins, which selected
-            AbnormalRecord = pd.DataFrame(AbnormalRecord,columns=['farm_code', 'farm_name', 'wtgs_id', 'model_name', 'abnormal_time','gen_power', 'avg_power', 'avg_speed'])
-            SelectedAbnormalRecord = pd.DataFrame()
-            abnormal_wtgs_list = sorted(list(set(AbnormalRecord['wtgs_id'].tolist())))
-            for abnormal_wtgs in abnormal_wtgs_list: # loop all possible wtgs
-                abnormal_wtgs_record = AbnormalRecord[AbnormalRecord['wtgs_id'] == abnormal_wtgs]
-                if len(abnormal_wtgs_record) >= 60 / MINUTES:
-                    rowi = 0
-                    while rowi < len(abnormal_wtgs_record):
-                        rowj = rowi + 1
-                        if rowj == len(abnormal_wtgs_record):
-                            break
-                        while rowj < len(abnormal_wtgs_record):
-                            if (datetime.datetime.strptime(abnormal_wtgs_record['abnormal_time'].iloc[rowj],"%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(abnormal_wtgs_record['abnormal_time'].iloc[rowj - 1],"%Y-%m-%d %H:%M:%S")).seconds == 60:
-                                rowj += 1
-                                if rowj == len(abnormal_wtgs_record):
-                                    rowi = len(abnormal_wtgs_record)
-                                    break
-                                else:
-                                    continue
-                            elif (datetime.datetime.strptime(abnormal_wtgs_record['abnormal_time'].iloc[rowj - 1],"%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(abnormal_wtgs_record['abnormal_time'].iloc[rowi],"%Y-%m-%d %H:%M:%S")).seconds >= 3600:
-                                if SelectedAbnormalRecord.empty:
-                                    SelectedAbnormalRecord = abnormal_wtgs_record.iloc[rowi:rowj]
-                                    # export data structure
-                                    ex_farm_code = str(abnormal_wtgs_record['farm_code'].iloc[rowi])
-                                    ex_farm_name = str(abnormal_wtgs_record['farm_name'].iloc[rowi])
-                                    ex_wtgs_id = str(abnormal_wtgs_record['wtgs_id'].iloc[rowi])
-                                    ex_wtgs_bd = str(self.wtgs_path[self.wtgs_path['WTGS_ID'] == abnormal_wtgs_record['wtgs_id'].iloc[rowi]]['WTGS_NAME'].iloc[0])
-                                    ex_start_time = str(abnormal_wtgs_record['abnormal_time'].iloc[rowi])
-                                    ex_end_time = str(abnormal_wtgs_record['abnormal_time'].iloc[rowj - 1])
-                                    ex_duration = str((datetime.datetime.strptime(ex_end_time,"%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(ex_start_time, "%Y-%m-%d %H:%M:%S")).seconds/3600)
-                                    self.abnormal_records.append([ex_farm_code, ex_farm_name, ex_wtgs_id, ex_wtgs_bd, MODEL_NAME, '',ex_start_time, ex_end_time, ex_duration, ANALYSOR, EVA_METHOD[0],datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '', '', '', '', '', '','', '', '', '', '', '', ''])
-                                    rowi = rowj
-                                    break
-                                else:
-                                    SelectedAbnormalRecord = pd.concat([SelectedAbnormalRecord,abnormal_wtgs_record.iloc[rowi:rowj]])
-                                    # export data structure
-                                    ex_farm_code = str(abnormal_wtgs_record['farm_code'].iloc[rowi])
-                                    ex_farm_name = str(abnormal_wtgs_record['farm_name'].iloc[rowi])
-                                    ex_wtgs_id = str(abnormal_wtgs_record['wtgs_id'].iloc[rowi])
-                                    ex_wtgs_bd = str(self.wtgs_path[self.wtgs_path['WTGS_ID'] ==abnormal_wtgs_record['wtgs_id'].iloc[rowi]]['WTGS_NAME'].iloc[0])
-                                    ex_start_time = str(abnormal_wtgs_record['abnormal_time'].iloc[rowi])
-                                    ex_end_time = str(abnormal_wtgs_record['abnormal_time'].iloc[rowj - 1])
-                                    ex_duration = str((datetime.datetime.strptime(ex_end_time,"%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(ex_start_time, "%Y-%m-%d %H:%M:%S")).seconds / 3600)
-                                    self.abnormal_records.append([ex_farm_code, ex_farm_name, ex_wtgs_id, ex_wtgs_bd, MODEL_NAME, '',ex_start_time, ex_end_time, ex_duration, ANALYSOR, EVA_METHOD[0],datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '', '', '', '', '', '','', '', '', '', '', '', ''])
-                                    rowi = rowj
-                                    break
-                            else:
-                                rowi = rowj
-                                break
-            if len(self.abnormal_records) > 0:
-                self.abnormal_records = pd.DataFrame(self.abnormal_records,columns=['farm_code','farm_name','wtgs_id','wtgs_bd','model_name','abnormal_group','abnormal_start_time','abnormal_end_time','abnormal_duration','creator','analysis_creator','create_time','release_time','result_engtec_dep','description_engtec_dep','checktime_engtec_dep','serial_number','serial_creator','serial_create_time','abnormal_level','serial_status','check_time_farm','result_farm','description_farm','delete'])
-                self.abnormal_detail = SelectedAbnormalRecord
+            self.abnormal_detail = pd.DataFrame(AbnormalRecord,
+                                                columns=['farm_code', 'farm_name', 'wtgs_id', 'model_name',
+                                                         'abnormal_time', 'gearbox_DE_temperature',
+                                                         'avg_temperature', 'avg_power'])
             print(self.wtgs_path['FARM_NAME'].iloc[0], 'calculate finished!')
 
         def export(self):
-
-            if len(self.abnormal_records) > 0:
-                (conn, cur) = sqlite_conn()
-                pd.io.sql.to_sql(self.abnormal_records, 'early_warning', con=conn, if_exists='append')
-                pd.io.sql.to_sql(self.abnormal_detail, 'GenPower', con=conn, if_exists='append')
-                conn.close()
+            # print(self.abnormal_detail)
+            if len(self.abnormal_detail) > 0:
                 try:
+                    (conn, cur) = sqlite_conn()
+                    pd.io.sql.to_sql(self.abnormal_detail, 'GearboxDETemp', con=conn, if_exists='append')
+                    conn.close()
                     print(self.wtgs_path['FARM_NAME'].iloc[0], 'export finished!')
                 except:
                     print('may be data repeat')
             else:
                 print(self.wtgs_path['FARM_NAME'].iloc[0], 'each wtgs is running well!')
-
-        def query_temp_mins_value(self, path, q1, q2):
-
-            (conn, cur) = mysql_conn(path['HOST'], path['PORT'], REMOTE_DB['user'], REMOTE_DB['passwd'], path['DB'])
-            starttimestamp = datetime.datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
-            endtimestmp = datetime.datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S")
-            # expand the query time(MINUTES/2 minutes before start time and MINUTES/2 minutes after end time
-            sqlstr = "SELECT wtid,real_time," + \
-                     self.power_tag + ',' + \
-                     self.windspeed_tag + \
-                     " FROM " + path['TABLE_NAME'] + \
-                     " WHERE " \
-                     + self.power_tag + " is not Null and " + \
-                     self.windspeed_tag + " is not Null and " + \
-                     self.run_condition_tag + "=\'3\' AND real_time BETWEEN \'" + \
-                     str(starttimestamp - timedelta(minutes=MINUTES / 2)) + "\' AND \'" \
-                     + str(endtimestmp + timedelta(minutes=MINUTES / 2)) + "\' ORDER BY real_time "
-            res = pd.read_sql(sqlstr, con=conn)
-            conn.close()
-            # generate a list of timestamp
-            timestampstr = []
-            timestamp = starttimestamp
-            while timestamp <= endtimestmp:
-                timestampstr.append(timestamp.strftime("%Y-%m-%d %H:%M:%S"))
-                timestamp += timedelta(minutes=MINUTES)
-            # get avg value of two tag
-            tempvalue = []
-            powervalue = []
-            for id in range(len(timestampstr)):
-                fromtime = (datetime.datetime.strptime(timestampstr[id], "%Y-%m-%d %H:%M:%S") - timedelta(
-                    minutes=MINUTES / 2)).strftime("%Y-%m-%d %H:%M:%S")
-                totime = (datetime.datetime.strptime(timestampstr[id], "%Y-%m-%d %H:%M:%S") + timedelta(
-                    minutes=MINUTES / 2)).strftime("%Y-%m-%d %H:%M:%S")
-                if len(res[(res['real_time'] >= fromtime) & (res['real_time'] <= totime)]):
-                    if len(res[(res['real_time'] >= fromtime) & (res['real_time'] <= totime)][self.power_tag]) > 0:
-                        data = res[(res['real_time'] >= fromtime) & (res['real_time'] <= totime)][self.power_tag]
-                        data = data.dropna(axis=0, how='any').tolist()
-                        tempvalue.append(sum(data) / len(data))
-                    else:
-                        tempvalue.append(0)
-                    if len(res[(res['real_time'] >= fromtime) & (res['real_time'] <= totime)][self.windspeed_tag]) > 0:
-                        data = res[(res['real_time'] >= fromtime) & (res['real_time'] <= totime)][self.windspeed_tag]
-                        data = data.dropna(axis=0, how='any').tolist()
-                        powervalue.append(sum(data) / len(data))
-                    else:
-                        powervalue.append(0)
-                else:
-                    tempvalue.append(0)
-                    powervalue.append(0)
-            tempvalue = pd.DataFrame(tempvalue, index=timestampstr, columns=[path['WTGS_ID']])
-            powervalue = pd.DataFrame(powervalue, index=timestampstr, columns=[path['WTGS_ID']])
-            q1.put(tempvalue)
-            q2.put(powervalue)
 
         def key_tags(self, farm):
             self.tag_set = {}
@@ -344,93 +194,67 @@ class generate:
                 if str(dframe[MODEL_NAME].iloc[i]) == '1.0':
                     self.tag_set[dframe.index[i]] = dframe['tag_EN'][i]
 
-class query:
-
-    def __init__(self,start_time, end_time, farm=''):
-        self.start_time=start_time
-        self.end_time=end_time
-        self.farm=[]
-        if farm:
-            self.farm=farm
-
-    def abnormal_records(self):
-
-        (conn, cur) = sqlite_conn()
-        if len(self.farm)>0:
-            sqlstr='SELECT farm_code,farm_name,wtgs_id,wtgs_bd,model_name,abnormal_start_time,abnormal_end_time,abnormal_duration,creator ' \
-               'FROM early_warning WHERE farm_name=\''+self.farm+'\' AND abnormal_start_time BETWEEN \''+self.start_time+'\' AND \''+self.end_time+'\' AND model_name=\''+MODEL_NAME+'\''
-        else:
-            sqlstr = 'SELECT farm_code,farm_name,wtgs_id,wtgs_bd,model_name,abnormal_start_time,abnormal_end_time,abnormal_duration,creator ' \
-                     'FROM early_warning WHERE abnormal_start_time BETWEEN \'' + self.start_time + '\' AND \'' + self.end_time + '\' AND model_name=\'' + MODEL_NAME + '\''
-        res=pd.read_sql(sqlstr,con=conn)
-        conn.close()
-        return res
-
-    def detail(self,abnormal_record):
-        assert len(abnormal_record)==1
-        self.cal_farm = farm_path()
-        self.key_tags(abnormal_record['farm_name'].iloc[0])
-        st =  datetime.datetime.strptime(abnormal_record['abnormal_start_time'].iloc[0], "%Y-%m-%d %H:%M:%S")-timedelta(minutes=5)# plus 5 minutes before abnormal duration
-        et =  datetime.datetime.strptime(abnormal_record['abnormal_end_time'].iloc[0], "%Y-%m-%d %H:%M:%S")+timedelta(minutes=5)# plus 5 minutes after abnormal duration
-        wtgs_path=self.cal_farm.wtgs_path[abnormal_record['farm_name'].iloc[0]]
-        target_path=wtgs_path[wtgs_path['WTGS_ID']==int(abnormal_record['wtgs_id'].iloc[0])]
-        (conn, cur) = mysql_conn(target_path['HOST'].iloc[0], int(target_path['PORT'].iloc[0]), REMOTE_DB['user'], REMOTE_DB['passwd'], target_path['DB'].iloc[0])
-        sqlstr = 'SELECT '+','.join(self.tag_set)
-        sqlstr+=' FROM '+target_path['TABLE_NAME'].iloc[0]+' WHERE real_time BETWEEN \'' + st.strftime('%Y-%m-%d %H:%M:%S') + '\' AND \'' + et.strftime('%Y-%m-%d %H:%M:%S') +'\''
-        res=pd.read_sql(sqlstr,con=conn)
-        return res
-
-    def curve(self,abnormal_record):
-
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-        plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
-        (conn, cur) = sqlite_conn()
-        sqlstr = 'SELECT * FROM GenPower WHERE wtgs_id=\'' + abnormal_record['wtgs_id'].iloc[0] + '\' AND abnormal_time BETWEEN \'' + abnormal_record['abnormal_start_time'].iloc[0] + '\' AND \'' + abnormal_record['abnormal_end_time'].iloc[0] + '\''
-        res = pd.read_sql(sqlstr, con=conn)
-        res.index = [datetime.datetime.strptime(timestr, '%Y-%m-%d %H:%M:%S') for timestr in res['abnormal_time'].tolist()]
-
-        fig, ax1 = plt.subplots(figsize=(15, 8))  # 使用subplots()创建窗口
-        ax2 = ax1.twinx()  # 创建第二个坐标轴
-
-        res['gen_power'].plot(ax=ax1, color='r')
-        res['avg_power'].plot(ax=ax1)
-        res['avg_speed'].plot(ax=ax2, color='g')
-        ax1.legend(['gen_power', 'avg_power'], loc='upper left')
-        ax2.legend(['avg_speed'], loc='upper right')
-        ax1.set_ylabel(MODEL_NAME[0:-2] + '(℃)', fontsize=12)
-        ax2.set_ylabel('平均风速', fontsize=12)
-        ax1.set_xlabel('时间', fontsize=12)
-        plt.grid()
-        plt.title(abnormal_record['farm_name'].iloc[0] + '-' + str(abnormal_record['wtgs_id'].iloc[0]) + ':' +
-                  abnormal_record['abnormal_start_time'].iloc[0] + '-' + abnormal_record['abnormal_end_time'].iloc[
-                      0] + '-' + MODEL_NAME + '-' + EVA_METHOD[0])
-        # plt.show()
-        plt.savefig("D:/work/亚健康模型/1.5&2.0MW/9.13-9.19/" + abnormal_record['farm_name'].iloc[0] + '-' + str(abnormal_record['wtgs_id'].iloc[0]) + '-' + MODEL_NAME + '-' + str(round(float(abnormal_record['abnormal_duration'].iloc[0]), 2)) + ".png")
-
-    def key_tags(self, farm):
-
-        self.tag_set = []
-        dframe = pd.read_excel("./config/tag/" + farm + ".xlsx", sheetname="sheet1")
-        for i in range(len(dframe[MODEL_NAME])):
-            if str(dframe[MODEL_NAME].iloc[i]) == '1.0':
-                self.tag_set.append(dframe['tag_EN'][i])
-
 class farm_path:
-
     # function: read local config file,.xlsx, and return the db path of each wtgs
     def __init__(self):
         self.farm_list()
         self.wtgs_list()
+
     def farm_list(self):
-        farm_info = pd.read_excel("./config/path/" + "FARM_LIST.xlsx",sheetname ="Sheet1")
-        self.farm_name=farm_info[farm_info['is_cal'] == 1]['farm_name'].tolist()
+        farm_info = pd.read_excel("./config/path/" + "FARM_LIST.xlsx", sheetname="Sheet1")
+        self.farm_name = farm_info[farm_info['is_cal'] == 1]['farm_name'].tolist()
+
     def wtgs_list(self):
-        self.wtgs_path={}
+        self.wtgs_path = {}
         for farm_name in self.farm_name:
-            wtgs_path = pd.read_excel("./config/path/" + farm_name + ".xlsx",sheetname ="Sheet1")
-            wtgs_path.index=wtgs_path['WTGS_ID'].tolist()
-            self.wtgs_path[farm_name]=wtgs_path
+            wtgs_path = pd.read_excel("./config/path/" + farm_name + ".xlsx", sheetname="Sheet1")
+            wtgs_path.index = wtgs_path['WTGS_ID'].tolist()
+            self.wtgs_path[farm_name] = wtgs_path
 
-if __name__=="__main__":
-    aaa = generate('2017-11-01 00:00:00', '2017-11-08 00:00:00', '刘利军')
+def abnormalRecordMeta(wtgs_path, abnormal_wtgs_record, rowi, rowj):
+    # export data structure
+    ex_farm_code = str(abnormal_wtgs_record['farm_code'].iloc[rowi])
+    ex_farm_name = str(abnormal_wtgs_record['farm_name'].iloc[rowi])
+    ex_wtgs_id = str(abnormal_wtgs_record['wtgs_id'].iloc[rowi])
+    ex_wtgs_bd = str(
+        wtgs_path[wtgs_path['WTGS_ID'] == int(abnormal_wtgs_record['wtgs_id'].iloc[0])]['WTGS_NAME'].iloc[0])
+    ex_start_time = str(abnormal_wtgs_record['abnormal_time'].iloc[rowi])
+    ex_end_time = str(abnormal_wtgs_record['abnormal_time'].iloc[rowj - 1])
+    ex_duration = str((datetime.strptime(ex_end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(ex_start_time,
+                                                                                               "%Y-%m-%d %H:%M:%S")).seconds / 3600)
+    return [ex_farm_code, ex_farm_name, ex_wtgs_id, ex_wtgs_bd, MODEL_NAME, '', ex_start_time, ex_end_time,
+            ex_duration, ANALYSOR, EVA_METHOD[0], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '', '', '', '', '',
+            '', '', '', '', '', '', '', '']
 
+def run_record(currentTime, seccess_flag):
+    try:
+        [conn, cur] = sqlite_conn()
+        sqlstr = "INSERT INTO run_record VALUES (\'" + MODEL_NAME + "\',\'ALL\',\'" + currentTime + "\',\'" + seccess_flag + "\')"
+        cur.execute(sqlstr)
+        conn.commit()
+        conn.close()
+    except:
+        print('repeat input!')
+    finally:
+        pass
+
+def main():
+    # conn = sqlite3.connect('../DB/early_warning.db')
+    # sqlstr = "SELECT MAX(run_time) FROM run_record WHERE model_name=\'" + MODEL_NAME + "\' AND seccess_flag=\'1'"
+    # latest_cal_time = pd.read_sql(sql=sqlstr, con=conn)
+    # conn.close()
+    # if len(latest_cal_time) > 1:
+    #     from_time = str(latest_cal_time['MAX(run_time)'].iloc[0])  # 已经计算的最新时间
+    # else:
+    #     from_time = (datetime.now() + timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S")  # 当前时间往前推7天
+    # currentTime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    from_time = "2017-12-12 23:59:00"
+    currentTime = "2017-12-13 00:00:00"
+    try:
+        generate(from_time, currentTime, ANALYSOR)
+        run_record(currentTime, '1')
+    except:
+        run_record(currentTime, '0')
+
+if __name__ == "__main__":
+    main()
