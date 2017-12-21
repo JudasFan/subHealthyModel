@@ -118,8 +118,8 @@ class generate:
             wtgs_list = []
             for index, row in self.wtgs_path.iterrows():
                 wtgs_list.append(str(self.wtgs_path.ix[index, :]['WTGS_ID']))
-            wtgsPowerValue = get.MultiFarmWithOneTag(wtgs_list, self.power, self.start_time, self.end_time)
-            wtgsTemperatureValue = get.MultiFarmWithOneTag(wtgs_list, self.temp_tag, self.start_time, self.end_time)
+            wtgsPowerValue = get.MultiWtgsWithOneTag(wtgs_list, self.power, self.start_time, self.end_time)
+            wtgsTemperatureValue = get.MultiWtgsWithOneTag(wtgs_list, self.temp_tag, self.start_time, self.end_time)
             print(self.wtgs_path['FARM_NAME'].iloc[0], 'query finished')
             # generate the abnormal record using boxplot or mean method
             AbnormalRecord = []
