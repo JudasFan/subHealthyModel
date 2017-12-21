@@ -113,16 +113,16 @@ class generate:
                     self.run_condition_tag = self.tag_set[key]
                 if '功率' in key:
                     self.power = self.tag_set[key]
-            self.run()  # run the algorithm and get the warnning info
+            self.mainstep()  # run the algorithm and get the warnning info
             self.export()  # export warning info to .DB (local or remote)
 
-        def run(self):
+        def mainstep(self):
             # step1:query real data
             wtgs_list=[]
             for index, row in self.wtgs_path.iterrows():
                 wtgs_list.append(str(self.wtgs_path.ix[index, :]['WTGS_ID']))
-            wtgsPowerValue=get.MultiFarmWithOneTag(wtgs_list,self.power,self.start_time,self.end_time)
-            wtgsTemperatureValue = get.MultiFarmWithOneTag(wtgs_list, self.temp_tag, self.start_time, self.end_time)
+            wtgsPowerValue=get.MultiWtgsWithOneTag(wtgs_list, self.power, self.start_time, self.end_time)
+            wtgsTemperatureValue = get.MultiWtgsWithOneTag(wtgs_list, self.temp_tag, self.start_time, self.end_time)
             print(self.wtgs_path['FARM_NAME'].iloc[0],'query finished')
             # generate the abnormal record using boxplot or mean method
             AbnormalRecord = []
